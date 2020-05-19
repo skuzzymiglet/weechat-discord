@@ -1414,7 +1414,7 @@ dependencies = [
 [[package]]
 name = "serenity"
 version = "0.7.0"
-source = "git+https://github.com/terminal-discord/serenity?rev=9d67e912#9d67e91223868e6419042de4417c1963822dc698"
+source = "git+https://github.com/terminal-discord/serenity?rev=async-loading-support#9baee6e42d9ea40d970d1eb6f6145df423593699"
 dependencies = [
  "base64 0.10.1",
  "bitflags",

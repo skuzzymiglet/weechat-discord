@@ -1,5 +1,5 @@
 use crate::{
-    on_main, printing,
+    discord, on_main, printing,
     sync::on_main_blocking,
     utils,
     utils::{BufferExt, ChannelExt},
@@ -14,6 +14,7 @@ use serenity::{
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
+    time::Duration,
 };
 use weechat::{
     buffer::HotlistPriority,
@@ -472,6 +473,7 @@ pub fn load_pin_buffer_history(buffer: &weechat::Buffer) {
         });
     });
 }
+
 pub fn load_pin_buffer_history_for_id(id: ChannelId) {
     on_main(move |weecord| {
         if let Some(buffer) = weecord.buffer_search("weecord", &format!("Pins.{}", id)) {
@@ -506,46 +508,174 @@ pub fn load_history(buffer: &weechat::Buffer, completion_sender: crossbeam_chann
 
         if let Ok(msgs) = channel.messages(ctx, |retriever| retriever.limit(fetch_count as u64)) {
             on_main(move |weechat| {
-                let ctx = match crate::discord::get_ctx() {
-                    Some(ctx) => ctx,
-                    _ => return,
-                };
                 let buf = sealed_buffer.unseal(&weechat);
 
-                if let Some(read_state) = ctx.cache.read().read_state.get(&channel) {
-                    let unread_in_page = msgs.iter().any(|m| m.id == read_state.last_message_id);
+                // if let Some(read_state) = ctx.cache.read().read_state.get(&channel) {
+                //     let unread_in_page = msgs.iter().any(|m| m.id == read_state.last_message_id);
+                //
+                //     if unread_in_page {
+                //         let mut backlog = true;
+                //         for msg in msgs.into_iter().rev() {
+                //             printing::print_msg(&weechat, &buf, &msg, false);
+                //             printing::inject_msg_id(msg.id, &buf);
+                //             if backlog {
+                //                 buf.mark_read();
+                //                 buf.clear_hotlist();
+                //             }
+                //             if msg.id == read_state.last_message_id {
+                //                 backlog = false;
+                //             }
+                //         }
+                //     } else {
+                //         buf.mark_read();
+                //         buf.clear_hotlist();
+                //         for msg in msgs.into_iter().rev() {
+                //             printing::print_msg(&weechat, &buf, &msg, false);
+                //             printing::inject_msg_id(msg.id, &buf);
+                //         }
+                //     }
+                // } else {
+                let mut content = String::new();
+                for msg in msgs.into_iter().rev() {
+                    content.push_str(&printing::print_msg(&weechat, &buf, &msg, false));
 
-                    if unread_in_page {
-                        let mut backlog = true;
-                        for msg in msgs.into_iter().rev() {
-                            printing::print_msg(&weechat, &buf, &msg, false);
-                            printing::inject_msg_id(msg.id, &buf);
-                            if backlog {
-                                buf.mark_read();
-                                buf.clear_hotlist();
-                            }
-                            if msg.id == read_state.last_message_id {
-                                backlog = false;
-                            }
-                        }
-                    } else {
-                        buf.mark_read();
-                        buf.clear_hotlist();
-                        for msg in msgs.into_iter().rev() {
-                            printing::print_msg(&weechat, &buf, &msg, false);
-                            printing::inject_msg_id(msg.id, &buf);
-                        }
-                    }
-                } else {
-                    for msg in msgs.into_iter().rev() {
-                        printing::print_msg(&weechat, &buf, &msg, false);
-                        printing::inject_msg_id(msg.id, &buf);
-                    }
+                    printing::inject_msg_id(msg.id, &buf);
                 }
+
+                lazy_static::lazy_static! {
+                    static ref INVALID_USER_MENTION: regex::Regex =
+                        regex::Regex::new(r"@invalid-user\{(\d+)\|(\d+)\} ").unwrap();
+                }
+
+                let invalid_mentions = INVALID_USER_MENTION.captures_iter(&content);
+                let mut ids_to_fetch = Vec::new();
+                for mention_match in invalid_mentions {
+                    let mention_id = mention_match.get(1).unwrap().as_str();
+                    let guild_id = mention_match.get(2).unwrap().as_str();
+                    ids_to_fetch.push((
+                        GuildId(guild_id.parse::<u64>().unwrap()),
+                        UserId(mention_id.parse::<u64>().unwrap()),
+                    ));
+                }
+                let buffer_name = buf.get_name().to_string();
+
+                std::thread::spawn(move || {
+                    let ctx = match discord::get_ctx() {
+                        Some(s) => s,
+                        None => return,
+                    };
+
+                    if ids_to_fetch.len() > 0 {
+                        let msg = json::object! {
+                            "op" => 8,
+                            "d" => json::object! {
+                                "guild_id" => vec![format!("{}", (ids_to_fetch[0].0).0)],
+                                "user_ids" => (ids_to_fetch.iter().map(|id| format!("{}",(id.1).0))).collect::<Vec<_>>(),
+                            }
+                        };
+                        ctx.shard.websocket_message(
+                            serenity::client::bridge::gateway::Message::Text(msg.to_string()),
+                        );
+                    }
+
+                    std::thread::sleep(Duration::from_secs(1000));
+                    on_main(move |discord| {
+                        let ctx = match discord::get_ctx() {
+                            Some(s) => s,
+                            None => return,
+                        };
+                        for id in ids_to_fetch {
+                            if let Some(user) = &(id.1).to_user_cached(&ctx.cache) {
+                                let display_name = format!("@{}!", user.read().name);
+                                eprintln!(
+                                    "{} -> {}",
+                                    &format!("@invalid-user{{{}|{}}}", (id.1).0, (id.0).0),
+                                    &display_name
+                                );
+                                find_and_replace_buffer_lines(
+                                    discord,
+                                    buffer_name.as_ref(),
+                                    &format!("@invalid-user{{{}|{}}}", (id.1).0, (id.0).0),
+                                    &display_name,
+                                );
+                            } else {
+                                eprintln!("failed to fetch: {}", id.1);
+                            }
+                        }
+                    });
+                });
                 completion_sender.send(()).unwrap();
             });
         }
     });
+}
+
+// HACK: TOTALLY HACKED
+pub fn find_and_replace_buffer_lines(
+    weecord: &Discord,
+    buffer_name: &str,
+    old_content: &str,
+    new_content: &str,
+) {
+    let buffer = match weecord.buffer_search("weecord", &buffer_name) {
+        Some(buf) => buf,
+        None => return,
+    };
+    if !buffer.history_loaded() {
+        return;
+    }
+
+    let buffer_hdata = buffer.get_hdata("buffer").unwrap();
+    let lines_ptr: HDataPointer = buffer_hdata.get_var("own_lines").unwrap();
+    let lines_hdata = lines_ptr.get_hdata("lines").unwrap();
+    let mut maybe_last_line_ptr = lines_hdata.get_var::<HDataPointer>("last_line");
+
+    // advance to the edited message
+    while let Some(last_line_ptr) = &maybe_last_line_ptr {
+        let last_line_hdata = last_line_ptr.get_hdata("line").unwrap();
+
+        let line_data_ptr: HDataPointer = last_line_hdata.get_var("data").unwrap();
+
+        let line_data_hdata = line_data_ptr.get_hdata("line_data").unwrap();
+
+        let line_contents = unsafe { line_data_hdata.get_string_unchecked("message") };
+        if let Some(line_contents) = line_contents {
+            if line_contents.contains(old_content) {
+                line_data_hdata
+                    .update_var("message", line_contents.replace(old_content, new_content));
+            }
+        }
+        // if get_msg_id(&last_line_hdata) == message_id.0 {
+        //     break;
+        // }
+
+        maybe_last_line_ptr = last_line_ptr.advance(&last_line_hdata, -1);
+    }
+
+    // // collect all lines of the message
+    // while let Some(last_line_ptr) = maybe_last_line_ptr {
+    //     let last_line_hdata = last_line_ptr.get_hdata("line").unwrap();
+    //
+    //     // if get_msg_id(&last_line_hdata) != message_id.0 {
+    //     //     break;
+    //     // }
+    //
+    //     let line_data_ptr: HDataPointer = last_line_hdata.get_var("data").unwrap();
+    //
+    //     let line_data_hdata = line_data_ptr.get_hdata("line_data").unwrap();
+    //
+    //     pointers.push(line_data_hdata);
+    //
+    //     maybe_last_line_ptr = last_line_ptr.advance(&last_line_hdata, -1);
+    // }
+
+    // let new_lines = new_content.splitn(pointers.len(), '\n');
+    // let new_lines = new_lines.map(|l| l.replace("\n", " | "));
+    // let new_lines = new_lines.chain(std::iter::repeat("".to_owned()));
+    //
+    // for (line_ptr, new_line) in pointers.iter().rev().zip(new_lines) {
+    //     line_ptr.update_var("message", new_line);
+    // }
 }
 
 pub fn load_dm_nicks(buffer: &Buffer, channel: &PrivateChannel) {

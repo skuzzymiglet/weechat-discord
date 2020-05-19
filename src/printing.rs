@@ -153,10 +153,10 @@ pub fn msg_tags(cache: &CacheRwLock, msg: &Message, notify: bool) -> Vec<String>
 }
 
 // TODO: Color things
-pub fn print_msg(weechat: &Weechat, buffer: &Buffer, msg: &Message, notify: bool) {
+pub fn print_msg(weechat: &Weechat, buffer: &Buffer, msg: &Message, notify: bool) -> String {
     let ctx = match crate::discord::get_ctx() {
         Some(ctx) => ctx,
-        _ => return,
+        _ => return "".into(),
     };
     let maybe_guild = buffer.guild_id();
 
@@ -164,6 +164,7 @@ pub fn print_msg(weechat: &Weechat, buffer: &Buffer, msg: &Message, notify: bool
     let timestamp = msg.timestamp.timestamp();
     let tags = msg_tags(&ctx.cache, msg, notify).join(",");
     buffer.print_tags_dated(timestamp, &tags, &format!("{}\t{}", prefix, content));
+    content
 }
 
 // Use the `date_printed` hdata field to store the message id in the last message
